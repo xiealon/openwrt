@@ -110,7 +110,7 @@ endef
 
 define Build/zyxel-nwa-fit-filogic
 	$(TOPDIR)/scripts/mkits-zyxel-fit-filogic.sh \
-		$@.its $@ "80 e1 ff ff ff ff ff ff ff ff"
+		$@.its $@ "80 e1 81 e1 ff ff ff ff ff ff"
 	PATH=$(LINUX_DIR)/scripts/dtc:$(PATH) mkimage -f $@.its $@.new
 	@mv $@.new $@
 endef
@@ -649,7 +649,7 @@ define Device/bananapi_bpi-r4-lite
   DEVICE_DTC_FLAGS := --pad 4096
   DEVICE_DTS_DIR := ../dts
   DEVICE_DTS_LOADADDR := 0x4ff00000
-  DEVICE_PACKAGES := kmod-eeprom-at24 \
+  DEVICE_PACKAGES := mt7987-2p5g-phy-firmware kmod-eeprom-at24 \
 		     kmod-gpio-pca953x kmod-i2c-mux-pca954x kmod-rtc-pcf8563 \
 		     kmod-sfp e2fsprogs mkf2fs
   BLOCKSIZE := 128k
@@ -1409,6 +1409,30 @@ define Device/huasifei_wh3000-pro
 endef
 TARGET_DEVICES += huasifei_wh3000-pro
 
+define Device/imou_hx21
+  DEVICE_VENDOR := Imou
+  DEVICE_MODEL := HX21
+  DEVICE_DTS := mt7981b-imou-hx21
+  DEVICE_DTS_DIR := ../dts
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware
+  UBINIZE_OPTS := -E 5
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  KERNEL_IN_UBI := 1
+  UBOOTENV_IN_UBI := 1
+  IMAGES := sysupgrade.itb
+  KERNEL_INITRAMFS_SUFFIX := -recovery.itb
+  KERNEL := kernel-bin | gzip
+  KERNEL_INITRAMFS := kernel-bin | lzma | \
+        fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 64k
+  IMAGE/sysupgrade.itb := append-kernel | \
+        fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-static-with-rootfs | append-metadata
+  ARTIFACTS := preloader.bin bl31-uboot.fip
+  ARTIFACT/preloader.bin := mt7981-bl2 spim-nand-ddr3
+  ARTIFACT/bl31-uboot.fip := mt7981-bl31-uboot imou_hx21
+endef
+TARGET_DEVICES += imou_hx21
+
 define Device/iptime_ax3000q
   DEVICE_VENDOR := ipTIME
   DEVICE_MODEL := AX3000Q
@@ -1427,6 +1451,26 @@ define Device/iptime_ax3000q
   SUPPORTED_DEVICES += mediatek,mt7981-spim-snand-rfb
 endef
 TARGET_DEVICES += iptime_ax3000q
+
+define Device/iptime_ax3000se
+  DEVICE_VENDOR := ipTIME
+  DEVICE_MODEL := AX3000SE
+  DEVICE_DTS := mt7981b-iptime-ax3000se
+  DEVICE_DTS_DIR := ../dts
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  IMAGE_SIZE := 32768k
+  KERNEL := kernel-bin | lzma | fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb
+  KERNEL_INITRAMFS := kernel-bin | lzma | \
+	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 64k
+  IMAGES := sysupgrade.bin
+  IMAGES := factory.bin sysupgrade.bin
+  IMAGE/factory.bin := sysupgrade-tar | append-metadata | check-size | iptime-crc32 ax3kse
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware
+  SUPPORTED_DEVICES += mediatek,mt7981-spim-snand-rfb
+endef
+TARGET_DEVICES += iptime_ax3000se
 
 define Device/iptime_ax3000sm
   DEVICE_VENDOR := ipTIME
@@ -1740,7 +1784,7 @@ define Device/mediatek_mt7987a-rfb
   DEVICE_DTS_DIR := ../dts
   DEVICE_DTC_FLAGS := --pad 4096
   DEVICE_DTS_LOADADDR := 0x4ff00000
-  DEVICE_PACKAGES := kmod-sfp
+  DEVICE_PACKAGES := mt7987-2p5g-phy-firmware kmod-sfp
   KERNEL_LOADADDR := 0x40000000
   KERNEL := kernel-bin | gzip
   KERNEL_INITRAMFS := kernel-bin | lzma | \
@@ -2219,7 +2263,7 @@ define Device/teltonika_rutc50
   KERNEL_IN_UBI := 1
   UBINIZE_OPTS := -E 5
   DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware kmod-usb3 kmod-usb-net-qmi-wwan \
-  kmod-usb-serial-option kmod-gpio-nxp-74hc164
+  kmod-usb-serial-option kmod-gpio-nxp-74hc164 uqmi
   IMAGES += factory.bin
   IMAGE/factory.bin := append-ubi | append-teltonika-metadata
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
@@ -2669,6 +2713,8 @@ define Device/zbtlink_zbt-z8102ax-v2
   IMAGES += factory.bin
   IMAGE/factory.bin := append-ubi | check-size $$(IMAGE_SIZE)
   IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  DEVICE_COMPAT_VERSION := 1.1
+  DEVICE_COMPAT_MESSAGE := Partition layout has been changed to fit the bootloader
 endef
 TARGET_DEVICES += zbtlink_zbt-z8102ax-v2
 
