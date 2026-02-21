@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-#include <asm/mach-rtl838x/mach-rtl83xx.h>
+#include <asm/mach-rtl-otto/mach-rtl-otto.h>
 #include <linux/etherdevice.h>
 
 #include "rtl83xx.h"
@@ -24,11 +24,6 @@
 #define RTL931X_VLAN_PORT_TAG_OTPID_KEEP_MASK			GENMASK(3, 3)
 #define RTL931X_VLAN_PORT_TAG_ITPID_IDX_MASK			GENMASK(2, 1)
 #define RTL931X_VLAN_PORT_TAG_ITPID_KEEP_MASK			GENMASK(0, 0)
-
-#define RTLDSA_931X_SMI_PHY_ABLTY_GET_SEL			0x0cac
-#define  RTLDSA_931X_PHY_ABLTY_OUTBAND_MDIO			0x0
-#define  RTLDSA_931X_PHY_ABLTY_INBAND_SDS_POLL			0x1
-#define  RTLDSA_931X_PHY_ABLTY_SDS_ABLTY_BUS			0x2
 
 /* Definition of the RTL931X-specific template field IDs as used in the PIE */
 enum template_field_id {
@@ -385,7 +380,7 @@ irqreturn_t rtl931x_switch_irq(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-void rtl931x_print_matrix(void)
+void rtldsa_931x_print_matrix(void)
 {
 	struct table_reg *r = rtl_table_get(RTL9310_TBL_2, 1);
 
@@ -1776,30 +1771,6 @@ static void rtldsa_931x_qos_init(struct rtl838x_switch_priv *priv)
 	rtldsa_931x_qos_set_scheduling_queue_weights(priv);
 }
 
-void rtldsa_931x_config_phy_ability_source(struct rtl838x_switch_priv *priv)
-{
-	u32 phy_ablty_sel[4] = {0};
-
-	for (int port = 0; port < priv->cpu_port; port++) {
-		u32 val = RTLDSA_931X_PHY_ABLTY_OUTBAND_MDIO;
-
-		/* port driven by SerDes */
-		if (!priv->ports[port].phy && priv->pcs[port])
-			val = RTLDSA_931X_PHY_ABLTY_SDS_ABLTY_BUS;
-
-		phy_ablty_sel[port / 16] |= (val & 0x3) << ((port % 16) * 2);
-	}
-
-	pr_debug("%s: phy_ablty_sel [0] %x [1] %x [2] %x [3] %x\n", __func__,
-		 phy_ablty_sel[0], phy_ablty_sel[1], phy_ablty_sel[2],
-		 phy_ablty_sel[3]);
-
-	sw_w32(phy_ablty_sel[0], RTLDSA_931X_SMI_PHY_ABLTY_GET_SEL);
-	sw_w32(phy_ablty_sel[1], RTLDSA_931X_SMI_PHY_ABLTY_GET_SEL + 0x4);
-	sw_w32(phy_ablty_sel[2], RTLDSA_931X_SMI_PHY_ABLTY_GET_SEL + 0x8);
-	sw_w32(phy_ablty_sel[3], RTLDSA_931X_SMI_PHY_ABLTY_GET_SEL + 0xc);
-}
-
 const struct rtldsa_config rtldsa_931x_cfg = {
 	.mask_port_reg_be = rtl839x_mask_port_reg_be,
 	.set_port_reg_be = rtl839x_set_port_reg_be,
@@ -1830,6 +1801,7 @@ const struct rtldsa_config rtldsa_931x_cfg = {
 	.isr_port_link_sts_chg = RTL931X_ISR_PORT_LINK_STS_CHG,
 	.imr_port_link_sts_chg = RTL931X_IMR_PORT_LINK_STS_CHG,
 	/* imr_glb does not exist on RTL931X */
+	.port_ignore = 0x3f,
 	.vlan_tables_read = rtl931x_vlan_tables_read,
 	.vlan_set_tagged = rtl931x_vlan_set_tagged,
 	.vlan_set_untagged = rtl931x_vlan_set_untagged,
@@ -1845,6 +1817,7 @@ const struct rtldsa_config rtldsa_931x_cfg = {
 	.get_mirror_config = rtldsa_931x_get_mirror_config,
 	.port_rate_police_add = rtldsa_931x_port_rate_police_add,
 	.port_rate_police_del = rtldsa_931x_port_rate_police_del,
+	.print_matrix = rtldsa_931x_print_matrix,
 	.read_l2_entry_using_hash = rtl931x_read_l2_entry_using_hash,
 	.write_l2_entry_using_hash = rtl931x_write_l2_entry_using_hash,
 	.read_cam = rtl931x_read_cam,
