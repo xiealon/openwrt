@@ -813,6 +813,8 @@ TARGET_DEVICES += bananapi_bpi-r4-lite
 define Device/bazis_ax3000wm
   DEVICE_VENDOR := Bazis
   DEVICE_MODEL := AX3000WM
+  DEVICE_ALT0_VENDOR := Shenzhen Jia Yan Technology
+  DEVICE_ALT0_MODEL := WD-R3000N-G2A
   DEVICE_DTS := mt7981b-bazis-ax3000wm
   DEVICE_DTS_DIR := ../dts
   UBINIZE_OPTS := -E 5
@@ -2105,7 +2107,7 @@ define Device/keenetic_kn-1812-common
   DEVICE_DTS_DIR := ../dts
   DEVICE_PACKAGES := kmod-mt7992-firmware kmod-usb3 \
 		mt7988-2p5g-phy-firmware mt7988-wo-firmware \
-		kmod-phy-realtek rtl8261n-firmware
+		kmod-phy-realtek rtl826x-firmware
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
@@ -2215,6 +2217,17 @@ define Device/konka_komi-a31
   ARTIFACT/bl31-uboot.fip := mt7981-bl31-uboot konka_komi-a31
 endef
 TARGET_DEVICES += konka_komi-a31
+
+define Device/livinet_li320
+  DEVICE_VENDOR := Livinet
+  DEVICE_MODEL := Li320
+  DEVICE_DTS := mt7981b-livinet-li320
+  DEVICE_DTS_DIR := ../dts
+  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware
+  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+  SUPPORTED_DEVICES += mediatek,mt7981-spim-snand-gsw-rfb
+endef
+TARGET_DEVICES += livinet_li320
 
 define Device/mediatek_mt7981-rfb
   DEVICE_VENDOR := MediaTek
@@ -3098,7 +3111,7 @@ define Device/tplink_be450
   DEVICE_DTS_DIR := ../dts
   DEVICE_PACKAGES := kmod-mt7992-firmware kmod-usb3 \
 	    mt7988-2p5g-phy-firmware mt7988-wo-firmware \
-	    kmod-phy-realtek rtl8261n-firmware
+	    kmod-phy-realtek rtl826x-firmware
   UBINIZE_OPTS := -E 5
   BLOCKSIZE := 128k
   PAGESIZE := 2048
