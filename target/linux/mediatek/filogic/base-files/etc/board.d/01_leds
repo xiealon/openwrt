@@ -71,6 +71,9 @@ bananapi,bpi-r4-poe)
 bananapi,bpi-r4-lite)
 	ucidef_set_led_netdev "sfp0" "sfp0" "green:sfp" "sfp0" "link tx rx"
 	;;
+bananapi,bpi-r4-pro-8x)
+	ucidef_set_led_netdev "lan5" "lan5" "mt7530-0:00:yellow" "lan5" "link tx rx"
+	;;
 bazis,ax3000wm)
 	ucidef_set_led_netdev "wanact" "WANACT" "mdio-bus:05:amber:wan" "eth0" "rx tx"
 	ucidef_set_led_netdev "wanlink" "WANLINK" "mdio-bus:05:green:wan" "eth0" "link"
@@ -93,14 +96,17 @@ cudy,wr3000e-v1-ubootmod)
 	ucidef_set_led_netdev "wan" "wan" "blue:wan" "wan"
 	;;
 cudy,wr3000h-v1|\
-cudy,wr3000h-v1-ubootmod|\
-cudy,wr3000p-v1|\
-cudy,wr3000p-v1-ubootmod)
+cudy,wr3000h-v1-ubootmod)
 	ucidef_set_led_netdev "lan1" "lan1" "white:lan-1" "lan1" "link tx rx"
 	ucidef_set_led_netdev "lan2" "lan2" "white:lan-2" "lan2" "link tx rx"
 	ucidef_set_led_netdev "lan3" "lan3" "white:lan-3" "lan3" "link tx rx"
 	ucidef_set_led_netdev "lan4" "lan4" "white:lan-4" "lan4" "link tx rx"
 	ucidef_set_led_netdev "wan" "wan" "white:wan" "wan" "link tx rx"
+	ucidef_set_led_netdev "internet" "internet" "white:wan-online" "wan" "link"
+	;;
+cudy,wr3000p-v1|\
+cudy,wr3000p-v1-ubootmod)
+	ucidef_set_led_netdev "wan" "wan" "mdio-bus:06:white:wan" "wan" "link tx rx"
 	ucidef_set_led_netdev "internet" "internet" "white:wan-online" "wan" "link"
 	;;
 cudy,wr3000u-v1|\
