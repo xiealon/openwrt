@@ -99,6 +99,7 @@
 
 /* L3 Routing */
 #define RTL839X_ROUTING_SA_CTRL			0x6afc
+#define RTL839X_ROUTING_EXCPT_CTRL		0x100c
 #define RTL930X_L3_HOST_TBL_CTRL		(0xAB48)
 #define RTL930X_L3_IPUC_ROUTE_CTRL		(0xAB4C)
 #define RTL930X_L3_IP6UC_ROUTE_CTRL		(0xAB50)
@@ -195,7 +196,6 @@ static void otto_l3_839x_setup_port_macs(struct otto_l3_ctrl *ctrl)
 	mac = ether_addr_to_u64(dev->dev_addr);
 
 	for (int i = 0; i < 15; i++) {
-		mac++;  /* BUG: VRRP for testing */
 		sw_w32(mac >> 32, RTL839X_ROUTING_SA_CTRL + i * 8);
 		sw_w32(mac, RTL839X_ROUTING_SA_CTRL + i * 8 + 4);
 	}
@@ -204,6 +204,13 @@ static void otto_l3_839x_setup_port_macs(struct otto_l3_ctrl *ctrl)
 static int otto_l3_839x_setup(struct otto_l3_ctrl *ctrl)
 {
 	otto_l3_839x_setup_port_macs(ctrl);
+
+	/* A routed packet whose TTL runs out goes to the CPU, which answers
+	 * it with Time Exceeded, instead of being dropped. IP4_TTL_EXECEED,
+	 * bits 3:2: 0 drop, 1 forward, 2 trap (Realtek GPL SDK,
+	 * dal_cypress_trap.c).
+	 */
+	sw_w32_mask(0x3 << 2, 2 << 2, RTL839X_ROUTING_EXCPT_CTRL);
 
 	return 0;
 }
@@ -1444,24 +1451,29 @@ static bool otto_l3_fwd_off(struct otto_l3_ctrl *ctrl, u8 type)
 	return type == ROUTE_TYPE_IP6UC ? ctrl->v6_fwd_off : ctrl->v4_fwd_off;
 }
 
-/* The kernel looks the local table up whole before main, so a local IPv4
- * prefix shorter than a host address (AnyIP: ip route add local ... table
- * local) takes the destinations of a longer main route inside it, which the
- * switch, longest prefix first, would forward. An IPv6 local prefix is not
- * looked at.
+/* The kernel looks the local table up whole before main, so a local prefix
+ * shorter than a host address (AnyIP: ip route add local ... table local)
+ * takes the destinations of a longer main route inside it, which the switch,
+ * longest prefix first, would forward.
  */
 static bool otto_l3_local_covers(struct otto_l3_ctrl *ctrl, struct otto_l3_route *r)
 {
 	struct otto_l3_route *q;
 
-	if (r->attr.type != ROUTE_TYPE_IP4UC || r->tb_id == RT_TABLE_LOCAL)
+	if (r->tb_id == RT_TABLE_LOCAL)
 		return false;
 
-	list_for_each_entry(q, &ctrl->routes_list, list)
-		if (q->attr.type == ROUTE_TYPE_IP4UC && q->tb_id == RT_TABLE_LOCAL &&
-		    !q->is_host_route && q->prefix_len < r->prefix_len &&
+	list_for_each_entry(q, &ctrl->routes_list, list) {
+		if (q->attr.type != r->attr.type || q->tb_id != RT_TABLE_LOCAL ||
+		    q->is_host_route || q->prefix_len >= r->prefix_len)
+			continue;
+		if (r->attr.type == ROUTE_TYPE_IP4UC &&
 		    !((q->dst_ip ^ r->dst_ip) & inet_make_mask(q->prefix_len)))
 			return true;
+		if (r->attr.type == ROUTE_TYPE_IP6UC &&
+		    ipv6_prefix_equal(&q->dst_ip6, &r->dst_ip6, q->prefix_len))
+			return true;
+	}
 
 	return false;
 }
@@ -3080,19 +3092,31 @@ static bool otto_l3_rules_allow(int family)
 	return main_seen;
 }
 
-/* A main IPv4 route inside the local prefix @info names */
-static bool otto_l3_route_inside(struct otto_l3_route *r, struct fib_entry_notifier_info *info)
+/* A main route inside the local prefix @info names */
+static bool otto_l3_route_inside(struct otto_l3_route *r, struct fib_notifier_info *info)
 {
-	return r->attr.type == ROUTE_TYPE_IP4UC && r->tb_id != RT_TABLE_LOCAL &&
-	       r->prefix_len > info->dst_len &&
-	       !((r->dst_ip ^ info->dst) & inet_make_mask(info->dst_len));
+	struct fib_entry_notifier_info *fen;
+	struct fib6_info *rt;
+
+	if (r->tb_id == RT_TABLE_LOCAL)
+		return false;
+
+	if (info->family == AF_INET) {
+		fen = container_of(info, struct fib_entry_notifier_info, info);
+		return r->attr.type == ROUTE_TYPE_IP4UC && r->prefix_len > fen->dst_len &&
+		       !((r->dst_ip ^ fen->dst) & inet_make_mask(fen->dst_len));
+	}
+
+	rt = container_of(info, struct fib6_entry_notifier_info, info)->rt;
+	return r->attr.type == ROUTE_TYPE_IP6UC && r->prefix_len > rt->fib6_dst.plen &&
+	       ipv6_prefix_equal(&r->dst_ip6, &rt->fib6_dst.addr, rt->fib6_dst.plen);
 }
 
 /* One resolve brings back every route through a gateway. With @info, only the
  * routes inside that local prefix are looked at.
  */
 static bool otto_l3_gw_seen(struct otto_l3_ctrl *ctrl, struct otto_l3_route *r,
-			    struct fib_entry_notifier_info *info)
+			    struct fib_notifier_info *info)
 {
 	struct otto_l3_route *q;
 
@@ -3163,23 +3187,41 @@ static void otto_l3_rules_check(struct otto_l3_ctrl *ctrl, int family)
  * it forwards, the way the policy rules bring a route back: through its
  * gateway, if it still answers.
  */
-static void otto_l3_local_prefix_check(struct otto_l3_ctrl *ctrl,
-				       struct fib_entry_notifier_info *info)
+static void otto_l3_local_prefix_check(struct otto_l3_ctrl *ctrl, struct fib_notifier_info *info)
 {
+	struct neigh_table *tbl = &arp_tbl;
+	struct fib_entry_notifier_info *fen;
 	struct otto_l3_route *r;
 	struct net_device *dev;
+	struct fib6_info *rt;
+	int len, host = 32;
+	u32 tb_id;
 
-	if (info->tb_id != RT_TABLE_LOCAL || !info->dst_len || info->dst_len >= 32 ||
-	    !ctrl->cfg->use_l3_tables)
+	if (info->family == AF_INET) {
+		fen = container_of(info, struct fib_entry_notifier_info, info);
+		tb_id = fen->tb_id;
+		len = fen->dst_len;
+	} else {
+		if (!IS_REACHABLE(CONFIG_IPV6))
+			return;
+		rt = container_of(info, struct fib6_entry_notifier_info, info)->rt;
+		tb_id = rt->fib6_table->tb6_id;
+		len = rt->fib6_dst.plen;
+		host = 128;
+		tbl = &nd_tbl;
+	}
+
+	if (tb_id != RT_TABLE_LOCAL || len >= host || !ctrl->cfg->use_l3_tables)
 		return;
 
 	list_for_each_entry(r, &ctrl->routes_list, list) {
-		if (!otto_l3_route_inside(r, info) || !r->gw_ip.s6_addr32[3] ||
+		if (!otto_l3_route_inside(r, info) || ipv6_addr_any(&r->gw_ip) ||
+		    (r->attr.type == ROUTE_TYPE_IP4UC && !r->gw_ip.s6_addr32[3]) ||
 		    otto_l3_gw_seen(ctrl, r, info))
 			continue;
 		dev = __dev_get_by_index(&init_net, r->gw_ifindex);
 		if (dev)
-			otto_l3_port_gw_resolve(ctrl, dev, &arp_tbl, &r->gw_ip);
+			otto_l3_port_gw_resolve(ctrl, dev, tbl, &r->gw_ip);
 	}
 }
 
@@ -3202,7 +3244,7 @@ static void otto_l3_fib_event_work_do(struct work_struct *work)
 		if (err)
 			dev_err(ctrl->dev, "fib_add() failed\n");
 
-		otto_l3_local_prefix_check(ctrl, &fib_work->fen_info);
+		otto_l3_local_prefix_check(ctrl, &fib_work->fen_info.info);
 		fib_info_put(fib_work->fen_info.fi);
 		break;
 	case FIB_EVENT_ENTRY_DEL:
@@ -3210,7 +3252,7 @@ static void otto_l3_fib_event_work_do(struct work_struct *work)
 		if (err)
 			dev_err(ctrl->dev, "fib_del() failed\n");
 
-		otto_l3_local_prefix_check(ctrl, &fib_work->fen_info);
+		otto_l3_local_prefix_check(ctrl, &fib_work->fen_info.info);
 		fib_info_put(fib_work->fen_info.fi);
 		break;
 	case FIB_EVENT_RULE_ADD:
@@ -3240,9 +3282,11 @@ static void otto_l3_fib6_event_work_do(struct work_struct *work)
 	case FIB_EVENT_ENTRY_REPLACE:
 	case FIB_EVENT_ENTRY_APPEND:
 		err = otto_l3_fib_add_v6(ctrl, &fib_work->fen6_info, fib_work->members);
+		otto_l3_local_prefix_check(ctrl, &fib_work->fen6_info.info);
 		break;
 	case FIB_EVENT_ENTRY_DEL:
 		err = otto_l3_fib_del_v6(ctrl, &fib_work->fen6_info, fib_work->members);
+		otto_l3_local_prefix_check(ctrl, &fib_work->fen6_info.info);
 		break;
 	}
 	if (err)
@@ -3917,7 +3961,74 @@ static const struct file_operations otto_l3_930x_clear_hit_fops = {
 	.write = otto_l3_930x_clear_hit_write,
 };
 
-static void otto_l3_930x_dbgfs_remove(void *data)
+/* An RTL839x routes through PIE rules: each one matches a destination prefix
+ * and forwards to the L2 entry of its gateway, and that entry names the
+ * ROUTING table row holding the gateway MAC.
+ */
+static int otto_l3_839x_route_show(struct seq_file *m, void *v)
+{
+	struct otto_l3_ctrl *ctrl = m->private;
+	struct rtl838x_switch_priv *priv = ctrl->priv;
+	int rows = priv->r->n_pie_blocks * PIE_BLOCK_SIZE;
+
+	seq_puts(m,
+		 " PIE DESTINATION        L2_IDX V NH PORT MAC               RVID ROUTE GATEWAY           MAC_ID  PACKETS\n");
+
+	for (int idx = 0; idx < rows; idx++) {
+		char dst[sizeof("255.255.255.255/32")];
+		struct rtl838x_l2_entry e = {};
+		struct otto_l3_route rt = {};
+		struct pie_rule pr;
+		u8 gw[ETH_ALEN];
+
+		if (!(idx % 64))
+			cond_resched();
+
+		priv->r->pie_rule_read(priv, idx, &pr);
+		if (!pr.valid || !pr.fwd_sel || pr.fwd_act != PIE_ACT_ROUTE_UC)
+			continue;
+
+		snprintf(dst, sizeof(dst), "%pI4/%d", &pr.dip, inet_mask_len(pr.dip_m));
+		seq_printf(m, "%4d %-18s %6d", idx, dst, pr.fwd_data);
+
+		priv->r->read_l2_entry_using_hash(pr.fwd_data >> 2, pr.fwd_data & 0x3, &e);
+		if (!e.valid) {
+			seq_puts(m, " 0  -    -                 -    -     -                 -      -");
+		} else {
+			seq_printf(m, " %d %2d %4d %pM %4d", e.valid, e.next_hop, e.port, e.mac, e.rvid);
+
+			if (e.next_hop) {
+				ctrl->cfg->route_read(ctrl, e.nh_route_id, &rt);
+				u64_to_ether_addr(rt.nh.gw, gw);
+				seq_printf(m, " %5d %pM %6d", e.nh_route_id, gw, rt.switch_mac_id);
+			} else {
+				seq_puts(m, "     -                 -      -");
+			}
+		}
+
+		if (pr.log_sel)
+			seq_printf(m, " %8u\n", priv->r->packet_cntr_read(priv, pr.log_data));
+		else
+			seq_puts(m, "        -\n");
+	}
+
+	return 0;
+}
+
+static int otto_l3_839x_route_open(struct inode *inode, struct file *filp)
+{
+	return single_open(filp, otto_l3_839x_route_show, inode->i_private);
+}
+
+static const struct file_operations otto_l3_839x_route_fops = {
+	.owner   = THIS_MODULE,
+	.open    = otto_l3_839x_route_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = single_release,
+};
+
+static void otto_l3_dbgfs_remove(void *data)
 {
 	debugfs_remove_recursive(data);
 }
@@ -3925,12 +4036,12 @@ static void otto_l3_930x_dbgfs_remove(void *data)
 #define OTTO_L3_DBG_ROOT_DIR	"realtek_otto_l3"
 
 /* A debugfs tree of its own rather than a subtree of the "rtl838x" directory
- * debugfs.c creates: otto_l3_probe() runs before rtl930x_dbgfs_init(), so
- * priv->dbgfs_dir does not exist yet at this point. A second RTL9300 in one
+ * debugfs.c creates: otto_l3_probe() runs before the init there, so
+ * priv->dbgfs_dir does not exist yet at this point. A second switch in one
  * system would find the name taken and log the warning below rather than
  * share the tree, since the directory is tied to @dev's devm lifetime.
  */
-static void otto_l3_930x_dbgfs_init(struct otto_l3_ctrl *ctrl)
+static struct dentry *otto_l3_dbgfs_root(struct otto_l3_ctrl *ctrl)
 {
 	struct device *dev = ctrl->dev;
 	struct dentry *root;
@@ -3941,10 +4052,28 @@ static void otto_l3_930x_dbgfs_init(struct otto_l3_ctrl *ctrl)
 		if (PTR_ERR(root) != -ENODEV)
 			dev_warn(dev, "could not create %s debugfs directory\n",
 				 OTTO_L3_DBG_ROOT_DIR);
-		return;
+		return NULL;
 	}
 
-	if (devm_add_action_or_reset(dev, otto_l3_930x_dbgfs_remove, root))
+	if (devm_add_action_or_reset(dev, otto_l3_dbgfs_remove, root))
+		return NULL;
+
+	return root;
+}
+
+static void otto_l3_839x_dbgfs_init(struct otto_l3_ctrl *ctrl)
+{
+	struct dentry *root = otto_l3_dbgfs_root(ctrl);
+
+	if (root)
+		debugfs_create_file("routes", 0400, root, ctrl, &otto_l3_839x_route_fops);
+}
+
+static void otto_l3_930x_dbgfs_init(struct otto_l3_ctrl *ctrl)
+{
+	struct dentry *root = otto_l3_dbgfs_root(ctrl);
+
+	if (!root)
 		return;
 
 	debugfs_create_file("routes", 0400, root, ctrl, &otto_l3_930x_route_fops);
@@ -3961,6 +4090,7 @@ const struct otto_l3_config otto_l3_839x_cfg = {
 	.route_read = otto_l3_839x_route_read,
 	.route_write = otto_l3_839x_route_write,
 	.setup = otto_l3_839x_setup,
+	.dbgfs_init = otto_l3_839x_dbgfs_init,
 };
 
 const struct otto_l3_config otto_l3_930x_cfg = {
